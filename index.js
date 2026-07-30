@@ -8,6 +8,7 @@
 
 const EXT_ID = 'fluid-transitions';
 const KEY = 'fluidTransitions';
+const VERSION = '1.5.0';
 
 const DEFAULTS = {
     enabled: true,
@@ -21,18 +22,19 @@ const DEFAULTS = {
     launch: true,          // 启动时整体淡入
     icons: true,           // 顶栏图标按下/选中反馈
     respectReduced: true,  // 跟随「减少动画」设置
-    solidWhileMoving: true,// 动画期间用不透明底代替毛玻璃（每帧重算模糊是最大的一笔开销）
+    blurSafe: true,        // 只动面板里的内容，不动带毛玻璃的面板本体（默认，见下）
+    solidWhileMoving: false,// 动画期间用不透明底代替毛玻璃（blurSafe 关掉时才有意义）
     noBlurAlways: false,   // 永久不要毛玻璃（最省，但静止时也没有质感）
     fadeOnly: false,       // 面板只淡入淡出、不位移（毛玻璃采样区域不动，最省）
     closeAnim: false,      // 关闭面板时也做动画（会强制重排一次，手机上很贵，默认关）
     lightPaint: true,      // 动画期间不画文字阴影
-    schema: 4,
+    schema: 5,
 };
 
 /** v1.2 那套「提速」整体撤掉了：keepWarm / prewarm / fastSwitch / autoPerf 全部删除。
  *  它们针对的是「几百张角色卡的排版」，而真机上的瓶颈是绘制（全屏毛玻璃逐帧重算），
  *  在手机上净收益为负，还引入了雾蒙蒙、闪帧和快速切换崩溃。别再加回来。 */
-const SCHEMA = 4;
+const SCHEMA = 5;
 
 function isPhone() {
     try { return innerWidth <= 900 || matchMedia('(pointer: coarse)').matches; }
@@ -82,8 +84,13 @@ function loadSettings() {
             for (const k of ['keepWarm', 'keepWarmMs', 'prewarm', 'fastSwitch', 'autoPerf']) delete merged[k];
             const phone = isPhone();
             merged.duration = phone ? 140 : 220;
-            merged.solidWhileMoving = true;
             merged.closeAnim = false;
+            // v1.5：blurSafe 取代了「换实色底」那条路 —— 毛玻璃层根本不参与动画，
+            // 就不用替换它，也就不会跟主题的底色规则打架（用户实测：换底色在他的主题上
+            // 挡不住背后文字，因为主题用了权重更高的选择器）。两个旧开关一并归零。
+            merged.blurSafe = true;
+            merged.solidWhileMoving = false;
+            merged.noBlurAlways = false;
             // 手机上位移会让毛玻璃每帧换采样区域，默认只做淡入
             merged.fadeOnly = phone;
             merged.schema = SCHEMA;
@@ -276,6 +283,35 @@ function clipReset() {
     document.documentElement.classList.remove('ftx-clip');
 }
 
+/** 动画到底挂在谁身上 —— v1.5 唯一的实质改动。
+ *
+ *  毛玻璃（backdrop-filter）长在面板本体（.drawer-content）上。一旦对这个元素做
+ *  opacity / transform，浏览器就必须把它提成合成层，并且逐帧重新采样背后的画面。
+ *  手机 WebView 上这个层往往要等几帧才就绪，于是：先是什么都画不出来（面板消失），
+ *  等就绪了才啪一下把毛玻璃贴上 —— 正是用户实测的
+ *  「开始会短暂看不见，然后闪一下出现毛玻璃」。
+ *
+ *  所以默认改成：**带毛玻璃的那层从头到尾一动不动**，只让它里面的内容做动画。
+ *  - 毛玻璃只在面板出现的那一刻算一次，不再逐帧重算（成本比换实色底还低）。
+ *  - 不用去改主题的底色，也就不会输给主题里 ID + !important 的规则。
+ *  代价：面板的底瞬间就位，只有内容淡入 / 滑入。手机上面板是整屏的，
+ *  观感是「背景先到位、内容跟上」，比整块闪一下干净。
+ *
+ *  不做 DOM 改造（不加包装层）：直接对所有直接子节点用同一份关键帧，
+ *  它们同步同幅移动，视觉上等于整组在动。 */
+function animTargets(el) {
+    if (!cfg.blurSafe) return [el];
+    const kids = [];
+    for (const k of el.children) {
+        if (k.nodeType !== 1) continue;
+        if (k.tagName === 'STYLE' || k.tagName === 'SCRIPT' || k.tagName === 'TEMPLATE') continue;
+        if (k.hidden) continue;
+        kids.push(k);
+    }
+    // 空面板（或结构意外）就退回动本体，至少还有动画
+    return kids.length ? kids : [el];
+}
+
 function play(el, dir) {
     const prev = running.get(el);
     if (prev) {
@@ -285,32 +321,36 @@ function play(el, dir) {
         // 立刻重算整个文档的样式和布局，而快速切换时每一下都在打断，
         // 于是越切越卡（用户实测「多个面板快速切换卡到按不动」）。别再改回去。
         prev.dir = dir;
-        try { prev.anim.reverse(); } catch { /* ignore */ }
+        for (const a of prev.anims) { try { a.reverse(); } catch { /* ignore */ } }
         return prev.anim;
     }
 
     const { keyframes, options } = framesFor(el, dir);
-    let anim;
-    try {
-        anim = el.animate(keyframes, options);
-    } catch {
+    const anims = [];
+    for (const t of animTargets(el)) {
+        try { anims.push(t.animate(keyframes, options)); } catch { /* ignore */ }
+    }
+    if (!anims.length) {
         el.classList.remove('ftx-animating', 'ftx-leaving');
         return null;
     }
 
-    const rec = { anim, dir };
+    const anim = anims[0]; // 代表动画：clip 计数和外部返回值都用它
+    const rec = { anim, anims, dir };
     el.classList.add('ftx-animating');
     running.set(el, rec);
     if (isSide(el)) { clipped.add(anim); clipStart(); }
 
-    anim.finished.then(() => {
+    // allSettled：某个子节点被客户端换掉导致它的动画被 cancel 时，
+    // 收尾逻辑照样要跑（否则 ftx-leaving / clip 会永久留着）。
+    Promise.allSettled(anims.map((a) => a.finished)).then(() => {
         releaseClip(anim);
         if (running.get(el) !== rec) return;
         running.delete(el);
         // 先摘掉 ftx-leaving（元素随即回到 display:none），再撤掉 fill，避免闪一帧
         el.classList.remove('ftx-leaving', 'ftx-animating');
-        try { anim.cancel(); } catch { /* ignore */ }
-    }, () => { releaseClip(anim); });
+        for (const a of anims) { try { a.cancel(); } catch { /* ignore */ } }
+    });
 
     return anim;
 }
@@ -451,7 +491,9 @@ function syncBody() {
     body.classList.toggle('ftx-popups', on && !!cfg.popups);
     body.classList.toggle('ftx-icons', on && !!cfg.icons);
     body.classList.toggle('ftx-light', on && lightPaint());
-    body.classList.toggle('ftx-solid', on && !!cfg.solidWhileMoving);
+    // blurSafe 开着时绝不换底色：面板本体不参与动画，换底色只会在动画头尾各闪一次
+    // （毛玻璃 → 实色 → 毛玻璃），那正是要消灭的现象。两者互斥，从这里锁住。
+    body.classList.toggle('ftx-solid', on && !!cfg.solidWhileMoving && !cfg.blurSafe);
     body.classList.toggle('ftx-noblur-always', on && !!cfg.noBlurAlways);
 
     root.style.setProperty('--ftx-dur', `${baseDuration()}ms`);
@@ -526,9 +568,13 @@ const SETTINGS_HTML = `
             </label>
 
             <div class="ftx-group-title">流畅度（手机上最关键的一组）</div>
+            <label class="checkbox_label" for="ftx_blurSafe">
+                <input id="ftx_blurSafe" type="checkbox" data-ftx="blurSafe">
+                <span>只让面板里的内容动，面板本体和毛玻璃不动（推荐；毛玻璃不会再闪一下才出现）</span>
+            </label>
             <label class="checkbox_label" for="ftx_solidWhileMoving">
                 <input id="ftx_solidWhileMoving" type="checkbox" data-ftx="solidWhileMoving">
-                <span>动画期间用同色不透明底代替毛玻璃（推荐，遮挡不变但不再逐帧模糊）</span>
+                <span>动画期间用同色不透明底代替毛玻璃（仅在上一项关掉时生效）</span>
             </label>
             <label class="checkbox_label" for="ftx_noBlurAlways">
                 <input id="ftx_noBlurAlways" type="checkbox" data-ftx="noBlurAlways">
@@ -557,6 +603,16 @@ const SETTINGS_HTML = `
                 <div id="ftx_preview" class="menu_button">预览一次</div>
                 <div id="ftx_reset" class="menu_button">恢复默认</div>
             </div>
+
+            <div class="ftx-group-title">诊断读数</div>
+            <textarea id="ftx_diag" class="text_pole ftx-diag" rows="3" readonly></textarea>
+            <div class="ftx-actions">
+                <div id="ftx_diag_refresh" class="menu_button">刷新读数</div>
+                <div id="ftx_diag_copy" class="menu_button">复制</div>
+            </div>
+            <small class="ftx-hint">手机上看不了控制台：外观有问题时，先打开出问题的那个面板，
+            再回来点「刷新读数」，把这行字发给我，就能定位到是主题、开关还是插件的问题。</small>
+
             <small class="ftx-hint">动画只是叠加在原生行为之上，随时可关；手机和电脑用同一套设置。</small>
         </div>
     </div>
@@ -584,6 +640,75 @@ function previewOnce() {
     cfg.enabled = wasOn;
 }
 
+/* ------------------------------------------------------ 诊断读数（手机没有控制台）
+   用户只有手机，开不了控制台，所以任何"看起来不对"都必须能靠一行字定位。
+   最关键的三个字段：
+     bgA    面板底色的不透明度 —— 关掉毛玻璃后如果 bgA < 1，就是主题的底色规则
+            权重压过了我们的，背后文字会透上来（v1.4 真机故障就是这个）。
+     blur   毛玻璃此刻是开着还是被关掉。
+     mid    动画进行中采一帧：p=面板本体上的动画数、k=第一个子节点上的动画数。
+            blurSafe 生效时必须是 p0/k1 —— 面板本体一个动画都不许有。 */
+
+function n(v) { return v ? 1 : 0; }
+
+function panelForDiag() {
+    return document.querySelector('.drawer-content.openDrawer:not(.pinnedOpen)')
+        || document.querySelector('.drawer-content.openDrawer')
+        || document.querySelector('.drawer-content.closedDrawer');
+}
+
+function diagStatic() {
+    const b = document.body?.classList;
+    const rootCS = getComputedStyle(document.documentElement);
+    const tint = parseRGB(rootCS.getPropertyValue('--SmartThemeBlurTintColor'));
+    const solid = rootCS.getPropertyValue('--ftx-solid').trim();
+    const panel = panelForDiag();
+    let bgA = '?', blur = '?', shadow = '?', kids = 0, id = 'none';
+    if (panel) {
+        id = panel.id || 'noid';
+        kids = panel.children.length;
+        const cs = getComputedStyle(panel);
+        const bg = parseRGB(cs.backgroundColor);
+        bgA = bg ? bg.a.toFixed(2) : '?';
+        const bd = cs.backdropFilter || cs.webkitBackdropFilter || 'none';
+        blur = /\d/.test(bd) ? 'yes' : 'no';
+        const bs = cs.boxShadow || 'none';
+        shadow = /inset/.test(bs) ? 'inset' : (bs === 'none' ? 'no' : 'other');
+    }
+    return [
+        `ftx v${VERSION}`,
+        `sty=${cfg.style}`, `dur=${cfg.duration}`,
+        `safe=${n(cfg.blurSafe)}`, `fade=${n(cfg.fadeOnly)}`,
+        `solid=${n(cfg.solidWhileMoving)}`, `noblur=${n(cfg.noBlurAlways)}`, `close=${n(cfg.closeAnim)}`,
+        `on=${n(b?.contains('ftx-on'))}`, `hasSolid=${n(b?.contains('ftx-has-solid'))}`,
+        `tint=${tint ? `${tint.r},${tint.g},${tint.b}@${tint.a}` : 'none'}`,
+        `calc=${solid ? solid.replace(/\s+/g, '') : 'none'}`,
+        `panel=${id}`, `kids=${kids}`, `bgA=${bgA}`, `blur=${blur}`, `shadow=${shadow}`,
+        `phone=${n(isPhone())}`, `reduced=${n(reducedMotion())}`, `vw=${innerWidth}`,
+    ].join(' ');
+}
+
+async function diagRefresh() {
+    const box = document.getElementById('ftx_diag');
+    if (!box) return;
+    const panel = panelForDiag();
+    if (!panel || !panel.classList.contains('openDrawer')) {
+        box.value = `${diagStatic()} mid=n/a(先打开一个面板再刷新)`;
+        return;
+    }
+    box.value = `${diagStatic()} mid=采样中…`;
+    const wasOn = cfg.enabled;
+    cfg.enabled = true;
+    play(panel, 'in');
+    cfg.enabled = wasOn;
+    await new Promise((r) => setTimeout(r, Math.min(140, Math.max(40, Math.round(baseDuration() / 3)))));
+    const p = panel.getAnimations().length;          // 只算挂在本体上的，不含后代
+    const kid = panel.firstElementChild;
+    const k = kid ? kid.getAnimations().length : 0;
+    const op = kid ? Number(getComputedStyle(kid).opacity) : 1;
+    box.value = `${diagStatic()} mid=p${p}/k${k}/op${op.toFixed(2)}`;
+}
+
 function mountSettings() {
     const host = document.getElementById('extensions_settings2') || document.getElementById('extensions_settings');
     if (!host || host.querySelector('.ftx-settings')) return false;
@@ -605,6 +730,22 @@ function mountSettings() {
     });
 
     root.querySelector('#ftx_preview')?.addEventListener('click', previewOnce);
+    root.querySelector('#ftx_diag_refresh')?.addEventListener('click', diagRefresh);
+    root.querySelector('#ftx_diag_copy')?.addEventListener('click', async () => {
+        const box = root.querySelector('#ftx_diag');
+        if (!box) return;
+        if (!box.value) await diagRefresh();
+        try {
+            await navigator.clipboard.writeText(box.value);
+            context()?.toastr?.info?.('读数已复制');
+        } catch {
+            // 手机浏览器可能不给剪贴板权限：选中让用户自己长按复制
+            box.removeAttribute('readonly');
+            box.focus();
+            box.select();
+            box.setAttribute('readonly', '');
+        }
+    });
     root.querySelector('#ftx_reset')?.addEventListener('click', () => {
         Object.assign(cfg, DEFAULTS);
         fillUI();
@@ -630,7 +771,10 @@ function teardown() {
     chatObserver = null;
     for (const el of document.querySelectorAll('.ftx-leaving, .ftx-animating')) {
         const rec = running.get(el);
-        if (rec) { running.delete(el); try { rec.anim.cancel(); } catch { /* ignore */ } }
+        if (rec) {
+            running.delete(el);
+            for (const a of rec.anims) { try { a.cancel(); } catch { /* ignore */ } }
+        }
         el.classList.remove('ftx-leaving', 'ftx-animating');
     }
     clipReset();
@@ -686,7 +830,9 @@ function init() {
         init,
         recolor: computeSolid,
         solid: () => getComputedStyle(document.documentElement).getPropertyValue('--ftx-solid').trim(),
-        version: '1.4.0',
+        version: VERSION,
+        diag: diagStatic,
+        diagRefresh,
     };
 }
 
