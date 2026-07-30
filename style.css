@@ -36,45 +36,6 @@ body.ftx-on #movingDivs > .drawer-content.ftx-leaving {
     height: unset !important;
 }
 
-/* 2.5 关着的面板：不是 display:none，而是「算好但不画」。
-   只在 body.ftx-keep 存在时生效，而这个 class 只在你刚碰过抽屉的几十秒内挂着 ——
-   因为这种面板始终有盒子，jQuery 的 :visible 会把关着的面板判成可见，
-   长期挂着可能误导别的扩展。闲下来就摘掉，回到原生 display:none。
-   这样再打开时浏览器不用从零排版几百个节点 —— 治「点了之后顿一下才动」。
-   盒子仍然是 0 高、不可点，jQuery 的 :visible 依旧判定为隐藏，对其他扩展是透明的。 */
-body.ftx-keep .drawer-content.closedDrawer:not(.ftx-leaving):not(.fillLeft):not(.fillRight) {
-    display: block !important;
-    content-visibility: hidden;
-    contain-intrinsic-size: auto 300px;
-    /* min-* 必须一起归零：客户端给侧栏写了 min-height/min-width:100px !important，
-       只写 height:0 会被顶掉，关着的面板就会偷偷占 100px（踩过） */
-    height: 0 !important;
-    width: 0 !important;
-    min-height: 0 !important;
-    min-width: 0 !important;
-    padding: 0 !important;
-    border-width: 0 !important;
-    overflow: hidden !important;
-    pointer-events: none !important;
-}
-
-body.ftx-keep .drawer-content.closedDrawer:not(.ftx-leaving):is(.fillLeft, .fillRight) {
-    display: flex !important;
-    content-visibility: hidden;
-    contain-intrinsic-size: auto 600px;
-    height: 0 !important;
-    width: 0 !important;
-    min-height: 0 !important;
-    min-width: 0 !important;
-    padding: 0 !important;
-    border-width: 0 !important;
-    overflow: hidden !important;
-    pointer-events: none !important;
-}
-
-/* 注意：上面两条必须写 :not(.ftx-leaving) —— 它们在 CSS 里排在离场规则之后，
-   同为 !important 时后者胜，正在播关闭动画的面板会被压成 0 高（踩过）。 */
-
 /* 3. 动画进行中 */
 body.ftx-on .drawer-content.ftx-animating {
     will-change: transform, opacity;
@@ -94,20 +55,30 @@ body.ftx-light .drawer-content.ftx-animating * {
     text-shadow: none !important;
 }
 
-/* 正在离场的面板无条件不做毛玻璃 —— 它在淡出/滑走，没人看得出来 */
-body.ftx-on .drawer-content.ftx-leaving {
+/* 毛玻璃 → 同色不透明底。
+   毛玻璃要「把背后的画面实时模糊一遍」，面板一动，被采样的区域每帧都在变，
+   于是每帧重算一次模糊 —— 手机上全场最贵的一笔。
+   但不能只把它关掉：主题的面板底色多半是半透明的，靠模糊遮挡，
+   一关就能看见背后的聊天文字透上来（用户实测踩过）。
+   所以同时把底色换成不透明的同色版本，遮挡不变、模糊成本归零。
+   --ftx-solid 由 JS 在启动和换主题时算一次；万一没算出来就退回原生毛玻璃。 */
+body.ftx-solid .drawer-content.ftx-animating,
+body.ftx-solid .drawer-content.ftx-leaving {
     backdrop-filter: none !important;
     -webkit-backdrop-filter: none !important;
+    background-color: var(--ftx-solid, rgba(28, 29, 36, 0.98)) !important;
+}
+
+/* 永久不要毛玻璃：连静止时也用实色底，最省 */
+body.ftx-noblur-always .drawer-content:is(.openDrawer, .closedDrawer, .ftx-leaving) {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    background-color: var(--ftx-solid, rgba(28, 29, 36, 0.98)) !important;
 }
 
 /* 侧边栏横滑期间掐掉页面溢出，避免手机上闪一条横向滚动条 */
 html.ftx-clip {
     overflow: hidden !important;
-}
-
-body.ftx-noblur .drawer-content.ftx-animating {
-    backdrop-filter: none !important;
-    -webkit-backdrop-filter: none !important;
 }
 
 /* 4. 顶栏图标：按下缩一下、选中的略放大（原生已经有 transition: all，这里只给值） */

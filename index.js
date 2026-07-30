@@ -12,7 +12,7 @@ const KEY = 'fluidTransitions';
 const DEFAULTS = {
     enabled: true,
     style: 'ios',          // fade | ios | spring
-    duration: 260,         // 进入动画时长 ms
+    duration: 220,         // 进入动画时长 ms（手机首次装会自动降到 170）
     drawers: true,         // 顶栏下拉面板（API / 世界书 / 用户设置 ...）
     panels: true,          // 左右侧边栏（左侧设置栏 / 右侧角色栏）
     popups: true,          // 弹窗
@@ -21,13 +21,22 @@ const DEFAULTS = {
     launch: true,          // 启动时整体淡入
     icons: true,           // 顶栏图标按下/选中反馈
     respectReduced: true,  // 跟随「减少动画」设置
-    keepWarm: true,        // 关着的面板保持「算好但不画」（治点击顿挫，最关键的一条）
-    keepWarmMs: 45000,     // 最后一次碰抽屉后，保持就绪多久
-    prewarm: true,         // 启动后趁空闲把重面板过一遍、按下时先解码头像
-    fastSwitch: true,      // 切面板不等客户端那 125ms
-    lightPaint: true,      // 动画期间不画毛玻璃和文字阴影
-    autoPerf: true,        // 掉帧就自动降级
+    solidWhileMoving: true,// 动画期间用不透明底代替毛玻璃（每帧重算模糊是最大的一笔开销）
+    noBlurAlways: false,   // 永久不要毛玻璃（最省，但静止时也没有质感）
+    fadeOnly: false,       // 面板只淡入淡出、不位移（毛玻璃采样区域不动，最省）
+    lightPaint: true,      // 动画期间不画文字阴影
+    schema: 3,
 };
+
+/** v1.2 那套「提速」整体撤掉了：keepWarm / prewarm / fastSwitch / autoPerf 全部删除。
+ *  它们针对的是「几百张角色卡的排版」，而真机上的瓶颈是绘制（全屏毛玻璃逐帧重算），
+ *  在手机上净收益为负，还引入了雾蒙蒙、闪帧和快速切换崩溃。别再加回来。 */
+const SCHEMA = 3;
+
+function isPhone() {
+    try { return innerWidth <= 900 || matchMedia('(pointer: coarse)').matches; }
+    catch { return false; }
+}
 
 const PRESETS = {
     fade: {
@@ -65,7 +74,16 @@ function context() {
 function loadSettings() {
     const store = context()?.extensionSettings;
     if (store) {
-        store[KEY] = Object.assign({}, DEFAULTS, store[KEY] || {});
+        const prev = store[KEY] || {};
+        const merged = Object.assign({}, DEFAULTS, prev);
+        if (prev.schema !== SCHEMA) {
+            // 老配置里那几个开关已经不存在了，顺手清掉，时长按设备重置一次
+            for (const k of ['keepWarm', 'keepWarmMs', 'prewarm', 'fastSwitch', 'autoPerf']) delete merged[k];
+            merged.duration = isPhone() ? 170 : 220;
+            merged.solidWhileMoving = true;
+            merged.schema = SCHEMA;
+        }
+        store[KEY] = merged;
         cfg = store[KEY];
     }
     return cfg;
@@ -79,37 +97,53 @@ function preset() {
     return PRESETS[cfg.style] || PRESETS.ios;
 }
 
-/** 自动降级：本次会话内有效，不写进设置 */
-let perfMode = false;
-let perfSamples = 0;
-
 function baseDuration() {
-    const d = Math.max(80, cfg.duration);
-    return perfMode ? Math.min(d, 180) : d;
+    return Math.max(80, cfg.duration);
+}
+
+/* ------------------------------------------------ 毛玻璃 → 同色不透明底
+
+   毛玻璃的含义是「把背后的画面实时模糊一遍」，面板一动，背后被采样的区域每帧都在变，
+   于是每帧都要重算一次模糊 —— 手机上这是全场最贵的一笔。
+   但直接把它关掉是错的：主题的面板底色通常是半透明的，靠模糊来遮挡，
+   一关就能看见背后的聊天文字透上来（用户实测反馈）。
+   正确做法是换成「同色但不透明」的底：遮挡照旧、模糊成本归零。
+   颜色只在启动和主题变化时算一次，绝不在动画过程里读计算样式。               */
+
+function parseRGB(str) {
+    const m = /rgba?\(([^)]+)\)/.exec(str || '');
+    if (!m) return null;
+    const n = m[1].split(/[,/\s]+/).filter(Boolean).map(Number);
+    if (n.length < 3 || n.slice(0, 3).some(Number.isNaN)) return null;
+    return { r: n[0], g: n[1], b: n[2], a: n.length > 3 && !Number.isNaN(n[3]) ? n[3] : 1 };
+}
+
+/** 找一个不透明的底色垫在半透明色调下面，尽量接近糊过之后的观感 */
+function underColor() {
+    for (const el of [document.body, document.getElementById('bg1'), document.documentElement]) {
+        if (!el) continue;
+        const c = parseRGB(getComputedStyle(el).backgroundColor);
+        if (c && c.a > 0.9) return c;
+    }
+    return { r: 20, g: 21, b: 26, a: 1 };
+}
+
+function computeSolid() {
+    const panel = document.querySelector('.drawer-content');
+    if (!panel) return;
+    const tint = parseRGB(getComputedStyle(panel).backgroundColor);
+    if (!tint) return;
+    let out = tint;
+    if (tint.a < 1) {
+        const base = underColor();
+        const mix = (x, y) => Math.round(x * tint.a + y * (1 - tint.a));
+        out = { r: mix(tint.r, base.r), g: mix(tint.g, base.g), b: mix(tint.b, base.b) };
+    }
+    document.documentElement.style.setProperty('--ftx-solid', `rgb(${out.r}, ${out.g}, ${out.b})`);
 }
 
 function lightPaint() {
-    return !!cfg.lightPaint || perfMode;
-}
-
-let cvSupported = null;
-let keepTimer = 0;
-
-/** 你正在操作抽屉 → 让关着的面板保持就绪；停手 45s 后还原成原生 display:none */
-function touchWarm() {
-    if (!active() || !cfg.keepWarm || !supportsKeepWarm()) return;
-    document.body.classList.add('ftx-keep');
-    clearTimeout(keepTimer);
-    keepTimer = setTimeout(() => document.body.classList.remove('ftx-keep'), Math.max(2000, cfg.keepWarmMs | 0));
-}
-
-/** content-visibility 是这套方案的关键，检测不到就整条跳过 */
-function supportsKeepWarm() {
-    if (cvSupported === null) {
-        try { cvSupported = !!(globalThis.CSS?.supports?.('content-visibility', 'hidden')); }
-        catch { cvSupported = false; }
-    }
-    return cvSupported;
+    return !!cfg.lightPaint;
 }
 
 function reducedMotion() {
@@ -152,51 +186,51 @@ function startOpacity(el, p) {
     return isSide(el) ? p.sideOpacity : 0;
 }
 
-/** 打断时的当前视觉状态 —— 从这里接着走，而不是跳回起点 */
-function currentState(el) {
-    const cs = getComputedStyle(el);
-    return { transform: cs.transform === 'none' ? 'none' : cs.transform, opacity: cs.opacity };
-}
-
-function framesFor(el, dir, from) {
+function framesFor(el, dir) {
     const p = preset();
-    const hidden = hiddenTransform(el, p);
-    const o0 = startOpacity(el, p);
+    const fade = !!cfg.fadeOnly;
+    const hidden = fade ? 'none' : hiddenTransform(el, p);
+    const o0 = fade ? 0 : startOpacity(el, p);
     const base = baseDuration();
-    // 被打断时缩短时长：剩下的路本来就短，用原时长会显得拖
-    const scale = from ? 0.7 : 1;
+    const bounce = p.overshoot && !fade;
 
+    // fill 一律用 both：
+    //   进场 —— 第一帧（透明+偏移）在动画真正开跑之前就生效。
+    //   早先写 fill:'none'，于是有一帧是「面板已按最终样子画出来」，
+    //   手机上一帧就是三五十毫秒，看起来就是点一下闪一下（用户实测）。
+    //   离场 —— 结束后按住隐藏状态，别在客户端收走之前弹回来。
+    //   顺带让 reverse() 打断时两头都有明确的状态可停。
     if (dir === 'out') {
         return {
             keyframes: [
-                from || { opacity: 1, transform: 'none' },
+                { opacity: 1, transform: 'none' },
                 { opacity: o0, transform: hidden },
             ],
             options: {
-                duration: Math.max(80, Math.round(base * p.outRatio * scale)),
+                duration: Math.max(80, Math.round(base * p.outRatio)),
                 easing: p.easeOut,
-                fill: 'forwards',
+                fill: 'both',
             },
         };
     }
 
-    const keyframes = (p.overshoot && !from)
+    const keyframes = bounce
         ? [
             { opacity: o0, transform: hidden, offset: 0 },
             { opacity: 1, transform: overshootTransform(el), offset: 0.64 },
             { opacity: 1, transform: 'none', offset: 1 },
         ]
         : [
-            from || { opacity: o0, transform: hidden },
+            { opacity: o0, transform: hidden },
             { opacity: 1, transform: 'none' },
         ];
 
     return {
         keyframes,
         options: {
-            duration: Math.max(80, Math.round(base * scale)),
-            easing: (p.overshoot && !from) ? 'cubic-bezier(.3,0,.35,1)' : p.ease,
-            fill: 'none',
+            duration: Math.max(80, base),
+            easing: bounce ? 'cubic-bezier(.3,0,.35,1)' : p.ease,
+            fill: 'both',
         },
     };
 }
@@ -225,57 +259,20 @@ function clipReset() {
     document.documentElement.classList.remove('ftx-clip');
 }
 
-/** 采样一段动画的帧间隔，连续两次判定掉帧就自动降级 */
-function sampleFrames(durationMs) {
-    if (!cfg.autoPerf || perfMode || typeof requestAnimationFrame !== 'function') return;
-    const t0 = performance.now();
-    let prev = 0;
-    let long = 0;
-    let frames = 0;
-    const tick = (ts) => {
-        if (prev) {
-            frames += 1;
-            if (ts - prev > 34) long += 1;
-        }
-        prev = ts;
-        if (performance.now() - t0 < durationMs + 60) {
-            requestAnimationFrame(tick);
-            return;
-        }
-        // 判定要覆盖两种慢：偶尔长帧（frames 够但 long 多），
-        // 以及机器慢到整段动画只挤出一两帧（早先只看 long/frames 比例，
-        // 20 倍降速下 frames < 4 直接被跳过，于是永远不会降级 —— 踩过）
-        const elapsed = Math.max(1, performance.now() - t0);
-        const fps = (frames * 1000) / elapsed;
-        // fps 低还要配上真长帧，否则天生 30Hz 的低刷屏会被误判成卡
-        const janky = frames >= 2
-            && ((fps < 40 && long >= 2) || long >= Math.max(2, Math.round(frames * 0.35)));
-        if (!janky) {
-            // 平稳的转场把计数退回去：开机那一下的卡不该把整个会话锁进省电模式
-            perfSamples = Math.max(0, perfSamples - 1);
-            return;
-        }
-        perfSamples += 1;
-        if (perfSamples >= 3) {
-            perfMode = true;
-            syncBody();
-            console.info('[fluid-transitions] 连续检测到掉帧，已自动切到省电模式（设置里可关掉「自动降级」）');
-        }
-    };
-    requestAnimationFrame(tick);
-}
-
 function play(el, dir) {
     const prev = running.get(el);
-    let from = null;
     if (prev) {
-        from = currentState(el);
-        running.delete(el);
-        releaseClip(prev);
-        try { prev.cancel(); } catch { /* ignore */ }
+        if (prev.dir === dir) return prev.anim; // 同方向又触发一次，别重来
+        // 打断就让原动画反向播。这一步不读任何样式，纯粹是合成器的事。
+        // 早先的写法是 getComputedStyle() 取当前位置再重建动画 —— 那会强制浏览器
+        // 立刻重算整个文档的样式和布局，而快速切换时每一下都在打断，
+        // 于是越切越卡（用户实测「多个面板快速切换卡到按不动」）。别再改回去。
+        prev.dir = dir;
+        try { prev.anim.reverse(); } catch { /* ignore */ }
+        return prev.anim;
     }
 
-    const { keyframes, options } = framesFor(el, dir, from);
+    const { keyframes, options } = framesFor(el, dir);
     let anim;
     try {
         anim = el.animate(keyframes, options);
@@ -284,19 +281,19 @@ function play(el, dir) {
         return null;
     }
 
+    const rec = { anim, dir };
     el.classList.add('ftx-animating');
-    running.set(el, anim);
+    running.set(el, rec);
     if (isSide(el)) { clipped.add(anim); clipStart(); }
-    sampleFrames(Number(options.duration) || 200);
 
     anim.finished.then(() => {
         releaseClip(anim);
-        if (running.get(el) !== anim) return;
+        if (running.get(el) !== rec) return;
         running.delete(el);
-        // 先摘掉 ftx-leaving（元素随即变回 display:none），再撤掉 forwards，避免闪一帧
+        // 先摘掉 ftx-leaving（元素随即回到 display:none），再撤掉 fill，避免闪一帧
         el.classList.remove('ftx-leaving', 'ftx-animating');
         try { anim.cancel(); } catch { /* ignore */ }
-    }, () => { /* cancelled */ });
+    }, () => { releaseClip(anim); });
 
     return anim;
 }
@@ -314,132 +311,6 @@ function onDrawerClose(el) {
     }
     el.classList.add('ftx-leaving');
     if (!play(el, 'out')) el.classList.remove('ftx-leaving');
-}
-
-/* ------------------------------------------------------------ 预热与抢跑 */
-
-const warmed = new WeakSet();
-
-/** 把面板临时挂出来（不可见）走一遍布局与图片解码，之后再收回去。
- *  这样真正打开时浏览器不用当场画几百个节点，就没有「点了不动」那一下。 */
-function prewarm(el) {
-    if (!el || !cfg.prewarm || warmed.has(el)) return;
-    if (el.classList.contains('openDrawer') || el.classList.contains('ftx-leaving')) return;
-    warmed.add(el);
-    try {
-        el.style.setProperty('content-visibility', 'visible', 'important');
-        el.style.setProperty('display', isSide(el) ? 'flex' : 'block', 'important');
-        el.style.setProperty('visibility', 'hidden', 'important');
-        el.style.setProperty('pointer-events', 'none', 'important');
-        el.style.setProperty('height', isSide(el) ? '100%' : 'auto', 'important');
-        void el.offsetHeight; // 强制一次布局
-        decodeImages(el);
-    } catch { /* ignore */ }
-    const undo = () => {
-        for (const prop of ['content-visibility', 'display', 'visibility', 'pointer-events', 'height']) {
-            el.style.removeProperty(prop);
-        }
-    };
-    // 两帧后收回：一帧布局、一帧绘制，图片解码是异步的但已经排上队了
-    requestAnimationFrame(() => requestAnimationFrame(undo));
-    setTimeout(undo, 400); // 兜底，别让面板卡在挂出来的状态
-}
-
-/** 头像是懒加载的，关着的时候一张都不读 —— 手机上「打开后还在渲染」就是这个。
- *  预热时顺手把前几十张读好、解好。 */
-/** 一次最多提前读多少张头像。
- *  手机上必须压住：关掉缩略图时头像就是 400x600 的角色卡 PNG，
- *  一张解码出来约 1MB 位图，80 张接近 80MB，够让手机 WebView 被系统杀掉。
- *  屏幕窄或内存小就只读一屏多一点。 */
-function decodeBudget() {
-    // 判手机要看触屏和宽度，别用 min(宽,高)：笔记本高度常年不到 900，会被误判（踩过）
-    let small = false;
-    try { small = innerWidth <= 900 || matchMedia('(pointer: coarse)').matches; } catch { /* ignore */ }
-    let lowMem = false;
-    try { lowMem = typeof navigator.deviceMemory === 'number' && navigator.deviceMemory <= 4; } catch { /* ignore */ }
-    if (small || lowMem) return 24;
-    return 80;
-}
-
-function decodeImages(el) {
-    const imgs = el.querySelectorAll('img');
-    const budget = decodeBudget();
-    let n = 0;
-    for (const img of imgs) {
-        if (n >= budget) break;
-        n += 1;
-        try {
-            if (img.loading === 'lazy') img.loading = 'eager';
-            if (typeof img.decode === 'function' && img.complete) img.decode().catch(() => {});
-        } catch { /* ignore */ }
-    }
-}
-
-function panelForToggle(node) {
-    const toggle = node.closest?.('.drawer-toggle');
-    if (toggle) return toggle.parentElement?.querySelector('.drawer-content') || null;
-    const opener = node.closest?.('[data-target]');
-    if (opener) {
-        const host = document.getElementById(opener.getAttribute('data-target'));
-        return host?.querySelector('.drawer-content') || host?.classList.contains('drawer-content') ? host : null;
-    }
-    return null;
-}
-
-/** 手指/鼠标按下时只干最便宜的一件事：把头像的加载/解码排上队。
- *  （早先版本在这里强制整块布局，慢机器上那份活儿会跟你抬手撞在一起，反而更顿 —— 别再加回来） */
-const decoded = new WeakSet();
-
-function onPointerDown(e) {
-    if (!active()) return;
-    const node = e.target;
-    if (!(node instanceof Element)) return;
-    const panel = panelForToggle(node);
-    if (!panel) return;
-    touchWarm(); // 保持就绪跟 prewarm 是两码事，不要被它的开关挡住
-    if (!cfg.prewarm || !managed(panel) || decoded.has(panel)) return;
-    decoded.add(panel);
-    decodeImages(panel);
-}
-
-/** 抢跑：客户端在「有面板开着」时会硬等 125ms 再开新面板。
- *  我们在它的处理器之前（捕获阶段）就把旧面板标成关闭 —— 它一看没有开着的面板，
- *  就跳过那段等待，新面板立刻开始进场，形成交叠切换。 */
-function onToggleCapture(e) {
-    if (!active()) return;
-    const node = e.target;
-    if (!(node instanceof Element)) return;
-    const target = panelForToggle(node);
-    if (!target) return;
-    touchWarm(); // 键盘/脚本触发的开关也算「正在操作抽屉」
-    if (!cfg.fastSwitch || target.classList.contains('openDrawer')) return;
-
-    const others = document.querySelectorAll('.drawer-content.openDrawer:not(.pinnedOpen)');
-    if (!others.length) return;
-    for (const el of others) {
-        if (el === target) continue;
-        el.classList.remove('openDrawer');
-        el.classList.add('closedDrawer');
-    }
-    for (const icon of document.querySelectorAll('.drawer-icon.openIcon:not(.drawerPinnedOpen)')) {
-        icon.classList.remove('openIcon');
-        icon.classList.add('closedIcon');
-    }
-}
-
-/** 启动后趁空闲把重面板预热一遍（错开，别抢启动的资源） */
-function warmAllWhenIdle() {
-    if (!cfg.prewarm) return;
-    const ids = ['right-nav-panel', 'left-nav-panel', 'rm_api_block', 'WorldInfo', 'user-settings-block'];
-    ids.forEach((id, i) => {
-        setTimeout(() => {
-            const el = document.getElementById(id);
-            if (!el || el.classList.contains('openDrawer')) return;
-            const run = () => prewarm(el);
-            if (typeof requestIdleCallback === 'function') requestIdleCallback(run, { timeout: 2000 });
-            else run();
-        }, 1500 + i * 500);
-    });
 }
 
 /* -------------------------------------------------------- 抽屉状态观察器 */
@@ -556,13 +427,9 @@ function syncBody() {
     body.classList.toggle('ftx-panels', on && !!cfg.panels);
     body.classList.toggle('ftx-popups', on && !!cfg.popups);
     body.classList.toggle('ftx-icons', on && !!cfg.icons);
-    body.classList.toggle('ftx-noblur', on && lightPaint());
     body.classList.toggle('ftx-light', on && lightPaint());
-    body.classList.toggle('ftx-perf', on && perfMode);
-    if (!on || !cfg.keepWarm || !supportsKeepWarm()) {
-        clearTimeout(keepTimer);
-        body.classList.remove('ftx-keep');
-    }
+    body.classList.toggle('ftx-solid', on && !!cfg.solidWhileMoving);
+    body.classList.toggle('ftx-noblur-always', on && !!cfg.noBlurAlways);
 
     root.style.setProperty('--ftx-dur', `${baseDuration()}ms`);
     root.style.setProperty('--ftx-dur-out', `${Math.max(80, Math.round(baseDuration() * p.outRatio))}ms`);
@@ -635,26 +502,22 @@ const SETTINGS_HTML = `
                 <span>顶栏图标按下 / 选中反馈</span>
             </label>
 
-            <div class="ftx-group-title">响应速度</div>
-            <label class="checkbox_label" for="ftx_keepWarm">
-                <input id="ftx_keepWarm" type="checkbox" data-ftx="keepWarm">
-                <span>关着的面板保持就绪（点击不再顿挫，最重要的一条）</span>
+            <div class="ftx-group-title">流畅度（手机上最关键的一组）</div>
+            <label class="checkbox_label" for="ftx_solidWhileMoving">
+                <input id="ftx_solidWhileMoving" type="checkbox" data-ftx="solidWhileMoving">
+                <span>动画期间用同色不透明底代替毛玻璃（推荐，遮挡不变但不再逐帧模糊）</span>
             </label>
-            <label class="checkbox_label" for="ftx_prewarm">
-                <input id="ftx_prewarm" type="checkbox" data-ftx="prewarm">
-                <span>提前加载头像（手机上打开后不再一点点渲染）</span>
+            <label class="checkbox_label" for="ftx_noBlurAlways">
+                <input id="ftx_noBlurAlways" type="checkbox" data-ftx="noBlurAlways">
+                <span>永久不要毛玻璃（最省；静止时也是实色底）</span>
             </label>
-            <label class="checkbox_label" for="ftx_fastSwitch">
-                <input id="ftx_fastSwitch" type="checkbox" data-ftx="fastSwitch">
-                <span>切面板不等待（去掉客户端的 125ms 空档）</span>
+            <label class="checkbox_label" for="ftx_fadeOnly">
+                <input id="ftx_fadeOnly" type="checkbox" data-ftx="fadeOnly">
+                <span>面板只淡入淡出、不位移（动效弱一些，但最省）</span>
             </label>
             <label class="checkbox_label" for="ftx_lightPaint">
                 <input id="ftx_lightPaint" type="checkbox" data-ftx="lightPaint">
-                <span>省电绘制：动画期间不画毛玻璃和文字阴影</span>
-            </label>
-            <label class="checkbox_label" for="ftx_autoPerf">
-                <input id="ftx_autoPerf" type="checkbox" data-ftx="autoPerf">
-                <span>掉帧时自动降级</span>
+                <span>动画期间不画文字阴影</span>
             </label>
 
             <div class="ftx-group-title">其他</div>
@@ -734,20 +597,18 @@ function mountSettingsWhenReady(tries = 40) {
 /* -------------------------------------------------------------------- 生命周期 */
 
 function teardown() {
-    document.removeEventListener('pointerdown', onPointerDown, { capture: true });
-    document.removeEventListener('touchstart', onPointerDown, { capture: true });
-    document.removeEventListener('click', onToggleCapture, true);
     drawerObserver?.disconnect();
     drawerObserver = null;
     chatObserver?.disconnect();
     chatObserver = null;
     for (const el of document.querySelectorAll('.ftx-leaving, .ftx-animating')) {
-        const anim = running.get(el);
-        if (anim) { running.delete(el); try { anim.cancel(); } catch { /* ignore */ } }
+        const rec = running.get(el);
+        if (rec) { running.delete(el); try { rec.anim.cancel(); } catch { /* ignore */ } }
         el.classList.remove('ftx-leaving', 'ftx-animating');
     }
     clipReset();
-    document.body.classList.remove('ftx-on', 'ftx-drawers', 'ftx-panels', 'ftx-popups', 'ftx-noblur', 'ftx-icons', 'ftx-light', 'ftx-perf', 'ftx-keep');
+    document.body.classList.remove('ftx-on', 'ftx-drawers', 'ftx-panels', 'ftx-popups',
+        'ftx-icons', 'ftx-light', 'ftx-solid', 'ftx-noblur-always');
 }
 
 function init() {
@@ -757,6 +618,7 @@ function init() {
         reduceQuery.addEventListener('change', syncBody);
     } catch { /* ignore */ }
 
+    computeSolid();
     syncBody();
     startDrawerObserver();
     startChatObserver();
@@ -769,21 +631,17 @@ function init() {
             ev.on(types.CHAT_CHANGED, () => { animateChatSwap(); startChatObserver(); });
         }
         if (types.SETTINGS_UPDATED) {
-            ev.on(types.SETTINGS_UPDATED, () => { loadSettings(); syncBody(); fillUI(); });
+            // 主题换了色调，不透明底要跟着重算（只有这种时候才算，动画里绝不算）
+            ev.on(types.SETTINGS_UPDATED, () => { loadSettings(); computeSolid(); syncBody(); fillUI(); });
         }
         if (types.APP_READY) {
-            ev.on(types.APP_READY, () => { seedDrawerState(); startChatObserver(); animateLaunch(); });
+            ev.on(types.APP_READY, () => { seedDrawerState(); computeSolid(); startChatObserver(); animateLaunch(); });
         }
     }
     // 用户在「用户设置」里勾选/取消「减少动画」时同步
     document.getElementById('reduced_motion')?.addEventListener('change', () => setTimeout(syncBody, 0));
 
-    document.addEventListener('pointerdown', onPointerDown, { capture: true, passive: true });
-    document.addEventListener('touchstart', onPointerDown, { capture: true, passive: true });
-    document.addEventListener('click', onToggleCapture, true);
-
     mountSettingsWhenReady();
-    warmAllWhenIdle();
     // APP_READY 没来（老版本 / 加载顺序意外）也别让首屏卡在透明状态
     setTimeout(animateLaunch, 3000);
 
@@ -796,11 +654,9 @@ function init() {
         launch: () => { launched = false; animateLaunch(); },
         teardown,
         init,
-        perf: () => ({ perfMode, perfSamples }),
-        setPerf: (v) => { perfMode = !!v; syncBody(); },
-        prewarm,
-        keepWarmSupported: supportsKeepWarm,
-        version: '1.2.0',
+        recolor: computeSolid,
+        solid: () => getComputedStyle(document.documentElement).getPropertyValue('--ftx-solid').trim(),
+        version: '1.3.0',
     };
 }
 
