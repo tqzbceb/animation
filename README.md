@@ -23,8 +23,9 @@
 把 `manifest.json` / `index.js` / `style.css` 放进酒馆数据目录的
 `extensions/fluid-transitions/`，重启客户端。
 
-**方式 B：Git URL**
-把这个目录作为**仓库根目录**推到 GitHub，然后在酒馆「扩展 → 安装扩展」里填仓库地址。
+**方式 B：Git URL（推荐）**
+在酒馆「扩展 → 安装扩展」里填 `https://github.com/tqzbceb/animation`。
+更新也点同一处重装即可。
 
 装好后设置在「扩展」面板里，标题是「流畅切换动画」。
 
