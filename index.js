@@ -24,14 +24,15 @@ const DEFAULTS = {
     solidWhileMoving: true,// 动画期间用不透明底代替毛玻璃（每帧重算模糊是最大的一笔开销）
     noBlurAlways: false,   // 永久不要毛玻璃（最省，但静止时也没有质感）
     fadeOnly: false,       // 面板只淡入淡出、不位移（毛玻璃采样区域不动，最省）
+    closeAnim: false,      // 关闭面板时也做动画（会强制重排一次，手机上很贵，默认关）
     lightPaint: true,      // 动画期间不画文字阴影
-    schema: 3,
+    schema: 4,
 };
 
 /** v1.2 那套「提速」整体撤掉了：keepWarm / prewarm / fastSwitch / autoPerf 全部删除。
  *  它们针对的是「几百张角色卡的排版」，而真机上的瓶颈是绘制（全屏毛玻璃逐帧重算），
  *  在手机上净收益为负，还引入了雾蒙蒙、闪帧和快速切换崩溃。别再加回来。 */
-const SCHEMA = 3;
+const SCHEMA = 4;
 
 function isPhone() {
     try { return innerWidth <= 900 || matchMedia('(pointer: coarse)').matches; }
@@ -79,8 +80,12 @@ function loadSettings() {
         if (prev.schema !== SCHEMA) {
             // 老配置里那几个开关已经不存在了，顺手清掉，时长按设备重置一次
             for (const k of ['keepWarm', 'keepWarmMs', 'prewarm', 'fastSwitch', 'autoPerf']) delete merged[k];
-            merged.duration = isPhone() ? 170 : 220;
+            const phone = isPhone();
+            merged.duration = phone ? 140 : 220;
             merged.solidWhileMoving = true;
+            merged.closeAnim = false;
+            // 手机上位移会让毛玻璃每帧换采样区域，默认只做淡入
+            merged.fadeOnly = phone;
             merged.schema = SCHEMA;
         }
         store[KEY] = merged;
@@ -118,28 +123,40 @@ function parseRGB(str) {
     return { r: n[0], g: n[1], b: n[2], a: n.length > 3 && !Number.isNaN(n[3]) ? n[3] : 1 };
 }
 
-/** 找一个不透明的底色垫在半透明色调下面，尽量接近糊过之后的观感 */
-function underColor() {
-    for (const el of [document.body, document.getElementById('bg1'), document.documentElement]) {
-        if (!el) continue;
-        const c = parseRGB(getComputedStyle(el).backgroundColor);
-        if (c && c.a > 0.9) return c;
-    }
-    return { r: 20, g: 21, b: 26, a: 1 };
+/** 底色只有一个可靠来源：主题变量 --SmartThemeBlurTintColor
+ *  （客户端就是用它给 .drawer-content 上底色的）。
+ *  把它的透明度拉满就得到「同色不透明」，绝不去猜背后垫什么颜色 ——
+ *  早先版本拿 body 背景混合、混不出来就退回硬编码的深色，
+ *  结果在浅色主题上糊出一块黑（用户实测「直接黑一块」）。
+ *  算不出来就什么都不做，宁可保留原生毛玻璃。 */
+/** 透明是「没有颜色信息」，不是黑色。
+ *  把 rgba(0,0,0,0) 的 alpha 拉满会得到纯黑 —— 浅色主题上就是那块黑（踩过两次）。 */
+function usable(c) {
+    return !!c && c.a > 0.05;
 }
 
 function computeSolid() {
-    const panel = document.querySelector('.drawer-content');
-    if (!panel) return;
-    const tint = parseRGB(getComputedStyle(panel).backgroundColor);
-    if (!tint) return;
-    let out = tint;
-    if (tint.a < 1) {
-        const base = underColor();
-        const mix = (x, y) => Math.round(x * tint.a + y * (1 - tint.a));
-        out = { r: mix(tint.r, base.r), g: mix(tint.g, base.g), b: mix(tint.b, base.b) };
+    const root = document.documentElement;
+    let c = null;
+    try {
+        c = parseRGB(getComputedStyle(root).getPropertyValue('--SmartThemeBlurTintColor'));
+    } catch { /* ignore */ }
+    if (!usable(c)) {
+        // 退一步从真正的抽屉面板上读（别读 #movingDivs 里那些同名 class 的东西）
+        const panel = document.querySelector('.drawer-content.openDrawer, .drawer-content.closedDrawer');
+        if (panel) {
+            try { c = parseRGB(getComputedStyle(panel).backgroundColor); } catch { /* ignore */ }
+        }
     }
-    document.documentElement.style.setProperty('--ftx-solid', `rgb(${out.r}, ${out.g}, ${out.b})`);
+    if (!usable(c)) {
+        root.style.removeProperty('--ftx-solid');
+        document.body?.classList.remove('ftx-has-solid');
+        return false;
+    }
+    const v = (x) => Math.max(0, Math.min(255, Math.round(x)));
+    root.style.setProperty('--ftx-solid', `rgb(${v(c.r)}, ${v(c.g)}, ${v(c.b)})`);
+    document.body?.classList.add('ftx-has-solid');
+    return true;
 }
 
 function lightPaint() {
@@ -305,8 +322,14 @@ function onDrawerOpen(el) {
 }
 
 function onDrawerClose(el) {
-    if (!active() || !managed(el)) {
+    // 关闭动画的代价：客户端已经把面板移出布局了（display:none），
+    // 要播离场就得用 .ftx-leaving 把它强行塞回去 —— 那是一次完整的重排，
+    // 手机上打开一个几百个控件的设置面板本来就慢，收回时再来一次就是
+    // 用户说的「收回动画卡的离谱」。所以默认不播，交回原生的瞬间消失。
+    if (!active() || !managed(el) || !cfg.closeAnim) {
         el.classList.remove('ftx-leaving', 'ftx-animating');
+        const rec = running.get(el);
+        if (rec) { running.delete(el); releaseClip(rec.anim); try { rec.anim.cancel(); } catch { /* ignore */ } }
         return;
     }
     el.classList.add('ftx-leaving');
@@ -515,6 +538,10 @@ const SETTINGS_HTML = `
                 <input id="ftx_fadeOnly" type="checkbox" data-ftx="fadeOnly">
                 <span>面板只淡入淡出、不位移（动效弱一些，但最省）</span>
             </label>
+            <label class="checkbox_label" for="ftx_closeAnim">
+                <input id="ftx_closeAnim" type="checkbox" data-ftx="closeAnim">
+                <span>关闭面板时也做动画（会明显变卡，手机建议不开）</span>
+            </label>
             <label class="checkbox_label" for="ftx_lightPaint">
                 <input id="ftx_lightPaint" type="checkbox" data-ftx="lightPaint">
                 <span>动画期间不画文字阴影</span>
@@ -608,7 +635,7 @@ function teardown() {
     }
     clipReset();
     document.body.classList.remove('ftx-on', 'ftx-drawers', 'ftx-panels', 'ftx-popups',
-        'ftx-icons', 'ftx-light', 'ftx-solid', 'ftx-noblur-always');
+        'ftx-icons', 'ftx-light', 'ftx-solid', 'ftx-noblur-always', 'ftx-has-solid');
 }
 
 function init() {
@@ -642,6 +669,9 @@ function init() {
     document.getElementById('reduced_motion')?.addEventListener('change', () => setTimeout(syncBody, 0));
 
     mountSettingsWhenReady();
+    // 主题往往在插件之后才应用，隔一会儿再算一次底色
+    setTimeout(computeSolid, 1200);
+    setTimeout(computeSolid, 4000);
     // APP_READY 没来（老版本 / 加载顺序意外）也别让首屏卡在透明状态
     setTimeout(animateLaunch, 3000);
 
@@ -656,7 +686,7 @@ function init() {
         init,
         recolor: computeSolid,
         solid: () => getComputedStyle(document.documentElement).getPropertyValue('--ftx-solid').trim(),
-        version: '1.3.0',
+        version: '1.4.0',
     };
 }
 

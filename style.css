@@ -62,18 +62,21 @@ body.ftx-light .drawer-content.ftx-animating * {
    一关就能看见背后的聊天文字透上来（用户实测踩过）。
    所以同时把底色换成不透明的同色版本，遮挡不变、模糊成本归零。
    --ftx-solid 由 JS 在启动和换主题时算一次；万一没算出来就退回原生毛玻璃。 */
-body.ftx-solid .drawer-content.ftx-animating,
-body.ftx-solid .drawer-content.ftx-leaving {
+/* 必须同时有 ftx-has-solid：那个 class 只有在真的从主题里算出颜色时才挂上。
+   早先写了硬编码的深色兜底，浅色主题上就糊出一块黑（踩过）——
+   算不出颜色时正确的做法是什么都不改，保留原生毛玻璃。 */
+body.ftx-solid.ftx-has-solid .drawer-content.ftx-animating,
+body.ftx-solid.ftx-has-solid .drawer-content.ftx-leaving {
     backdrop-filter: none !important;
     -webkit-backdrop-filter: none !important;
-    background-color: var(--ftx-solid, rgba(28, 29, 36, 0.98)) !important;
+    background-color: var(--ftx-solid) !important;
 }
 
 /* 永久不要毛玻璃：连静止时也用实色底，最省 */
-body.ftx-noblur-always .drawer-content:is(.openDrawer, .closedDrawer, .ftx-leaving) {
+body.ftx-noblur-always.ftx-has-solid .drawer-content:is(.openDrawer, .closedDrawer, .ftx-leaving) {
     backdrop-filter: none !important;
     -webkit-backdrop-filter: none !important;
-    background-color: var(--ftx-solid, rgba(28, 29, 36, 0.98)) !important;
+    background-color: var(--ftx-solid) !important;
 }
 
 /* 侧边栏横滑期间掐掉页面溢出，避免手机上闪一条横向滚动条 */
