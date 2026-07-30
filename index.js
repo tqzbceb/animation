@@ -347,11 +347,26 @@ function prewarm(el) {
 
 /** 头像是懒加载的，关着的时候一张都不读 —— 手机上「打开后还在渲染」就是这个。
  *  预热时顺手把前几十张读好、解好。 */
+/** 一次最多提前读多少张头像。
+ *  手机上必须压住：关掉缩略图时头像就是 400x600 的角色卡 PNG，
+ *  一张解码出来约 1MB 位图，80 张接近 80MB，够让手机 WebView 被系统杀掉。
+ *  屏幕窄或内存小就只读一屏多一点。 */
+function decodeBudget() {
+    // 判手机要看触屏和宽度，别用 min(宽,高)：笔记本高度常年不到 900，会被误判（踩过）
+    let small = false;
+    try { small = innerWidth <= 900 || matchMedia('(pointer: coarse)').matches; } catch { /* ignore */ }
+    let lowMem = false;
+    try { lowMem = typeof navigator.deviceMemory === 'number' && navigator.deviceMemory <= 4; } catch { /* ignore */ }
+    if (small || lowMem) return 24;
+    return 80;
+}
+
 function decodeImages(el) {
     const imgs = el.querySelectorAll('img');
+    const budget = decodeBudget();
     let n = 0;
     for (const img of imgs) {
-        if (n >= 80) break;
+        if (n >= budget) break;
         n += 1;
         try {
             if (img.loading === 'lazy') img.loading = 'eager';
