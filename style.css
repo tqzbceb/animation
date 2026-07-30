@@ -36,10 +36,68 @@ body.ftx-on #movingDivs > .drawer-content.ftx-leaving {
     height: unset !important;
 }
 
+/* 2.5 关着的面板：不是 display:none，而是「算好但不画」。
+   只在 body.ftx-keep 存在时生效，而这个 class 只在你刚碰过抽屉的几十秒内挂着 ——
+   因为这种面板始终有盒子，jQuery 的 :visible 会把关着的面板判成可见，
+   长期挂着可能误导别的扩展。闲下来就摘掉，回到原生 display:none。
+   这样再打开时浏览器不用从零排版几百个节点 —— 治「点了之后顿一下才动」。
+   盒子仍然是 0 高、不可点，jQuery 的 :visible 依旧判定为隐藏，对其他扩展是透明的。 */
+body.ftx-keep .drawer-content.closedDrawer:not(.ftx-leaving):not(.fillLeft):not(.fillRight) {
+    display: block !important;
+    content-visibility: hidden;
+    contain-intrinsic-size: auto 300px;
+    /* min-* 必须一起归零：客户端给侧栏写了 min-height/min-width:100px !important，
+       只写 height:0 会被顶掉，关着的面板就会偷偷占 100px（踩过） */
+    height: 0 !important;
+    width: 0 !important;
+    min-height: 0 !important;
+    min-width: 0 !important;
+    padding: 0 !important;
+    border-width: 0 !important;
+    overflow: hidden !important;
+    pointer-events: none !important;
+}
+
+body.ftx-keep .drawer-content.closedDrawer:not(.ftx-leaving):is(.fillLeft, .fillRight) {
+    display: flex !important;
+    content-visibility: hidden;
+    contain-intrinsic-size: auto 600px;
+    height: 0 !important;
+    width: 0 !important;
+    min-height: 0 !important;
+    min-width: 0 !important;
+    padding: 0 !important;
+    border-width: 0 !important;
+    overflow: hidden !important;
+    pointer-events: none !important;
+}
+
+/* 注意：上面两条必须写 :not(.ftx-leaving) —— 它们在 CSS 里排在离场规则之后，
+   同为 !important 时后者胜，正在播关闭动画的面板会被压成 0 高（踩过）。 */
+
 /* 3. 动画进行中 */
 body.ftx-on .drawer-content.ftx-animating {
     will-change: transform, opacity;
-    overflow-y: hidden !important;
+}
+
+/* 滚动条从第一帧就在：原生会在开抽屉的 250ms 里把它藏起来（hide-scroll），
+   我们已经把那条动画掐掉了，这里再给它预留固定宽度，避免出现时把内容挤一下 */
+body.ftx-drawers .drawer-content:is(.openDrawer, .closedDrawer):not(.fillLeft):not(.fillRight),
+body.ftx-panels .drawer-content:is(.openDrawer, .closedDrawer) .scrollableInner,
+body.ftx-panels .drawer-content:is(.openDrawer, .closedDrawer) .scrollableInnerFull {
+    scrollbar-gutter: stable;
+}
+
+/* 省电绘制：转场期间不画文字阴影（酒馆给 * 都加了阴影，这是绘制大头） */
+body.ftx-light .drawer-content.ftx-animating,
+body.ftx-light .drawer-content.ftx-animating * {
+    text-shadow: none !important;
+}
+
+/* 正在离场的面板无条件不做毛玻璃 —— 它在淡出/滑走，没人看得出来 */
+body.ftx-on .drawer-content.ftx-leaving {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
 }
 
 /* 侧边栏横滑期间掐掉页面溢出，避免手机上闪一条横向滚动条 */
