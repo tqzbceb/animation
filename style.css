@@ -1,0 +1,163 @@
+/* 流畅切换动画 · Fluid Transitions
+   动画本体由 index.js 用 Web Animations API 播放（兼容性最好）。
+   这里只做三件事：让原生的 height 过渡让位、离场时把元素按住不让它瞬间消失、弹窗动效替换。 */
+
+:root {
+    --ftx-dur: 260ms;
+    --ftx-dur-out: 170ms;
+    --ftx-ease: cubic-bezier(.22, 1, .36, 1);
+    --ftx-ease-out: cubic-bezier(.36, 0, .7, .2);
+    --ftx-pop-y: 10px;
+    --ftx-pop-scale: .955;
+}
+
+/* 1. 接管的面板：撤掉原生 height/display 过渡与滚动条隐藏动画，改由 JS 控制 */
+body.ftx-drawers .drawer-content:is(.openDrawer, .closedDrawer):not(.fillLeft):not(.fillRight),
+body.ftx-panels .drawer-content:is(.openDrawer, .closedDrawer):is(.fillLeft, .fillRight) {
+    transition-property: none !important;
+    animation-name: none !important;
+}
+
+/* 2. 离场：类名已经变成 closedDrawer，靠这条把元素按住播完动画 */
+body.ftx-on .drawer-content.ftx-leaving {
+    display: block !important;
+    height: auto !important;
+    overflow: hidden !important;
+    pointer-events: none !important;
+}
+
+body.ftx-on .drawer-content.ftx-leaving:is(.fillLeft, .fillRight) {
+    display: flex !important;
+    height: 100% !important;
+}
+
+/* movingUI 拖出来的面板高度是 unset，别改成 auto */
+body.ftx-on #movingDivs > .drawer-content.ftx-leaving {
+    height: unset !important;
+}
+
+/* 3. 动画进行中 */
+body.ftx-on .drawer-content.ftx-animating {
+    will-change: transform, opacity;
+    overflow-y: hidden !important;
+}
+
+/* 侧边栏横滑期间掐掉页面溢出，避免手机上闪一条横向滚动条 */
+html.ftx-clip {
+    overflow: hidden !important;
+}
+
+body.ftx-noblur .drawer-content.ftx-animating {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+}
+
+/* 4. 顶栏图标：按下缩一下、选中的略放大（原生已经有 transition: all，这里只给值） */
+body.ftx-on.ftx-icons .drawer-icon.openIcon {
+    transform: scale(1.08);
+}
+
+body.ftx-on.ftx-icons .drawer-icon:active {
+    transform: scale(.88);
+}
+
+/* 5. 弹窗：把原生 scaleY 的 pop-in/pop-out 换成缩放+上浮+淡入 */
+@keyframes ftx-pop-in {
+    from {
+        opacity: 0;
+        transform: translate3d(0, var(--ftx-pop-y), 0) scale(var(--ftx-pop-scale));
+    }
+
+    to {
+        opacity: 1;
+        transform: none;
+    }
+}
+
+@keyframes ftx-pop-out {
+    from {
+        opacity: 1;
+        transform: none;
+    }
+
+    to {
+        opacity: 0;
+        transform: translate3d(0, calc(var(--ftx-pop-y) * .5), 0) scale(var(--ftx-pop-scale));
+    }
+}
+
+@keyframes ftx-fade-in {
+    from {
+        opacity: 0;
+    }
+
+    to {
+        opacity: 1;
+    }
+}
+
+@keyframes ftx-fade-out {
+    from {
+        opacity: 1;
+    }
+
+    to {
+        opacity: 0;
+    }
+}
+
+body.ftx-popups .popup[opening] {
+    animation: ftx-pop-in var(--ftx-dur) var(--ftx-ease) both !important;
+}
+
+body.ftx-popups .popup[opening]::backdrop {
+    animation: ftx-fade-in var(--ftx-dur) var(--ftx-ease) both !important;
+}
+
+body.ftx-popups .popup[closing] {
+    animation: ftx-pop-out var(--ftx-dur-out) var(--ftx-ease-out) both !important;
+}
+
+body.ftx-popups .popup[closing]::backdrop {
+    animation: ftx-fade-out var(--ftx-dur-out) var(--ftx-ease-out) both !important;
+}
+
+/* 原生要求「无动画」的弹窗照旧 */
+body.ftx-popups .popup.popup--animation-none[opening],
+body.ftx-popups .popup.popup--animation-none[closing] {
+    animation: none !important;
+}
+
+/* 6. 设置面板 */
+.ftx-settings .inline-drawer-content {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.ftx-settings .ftx-group-title {
+    margin-top: 10px;
+    font-weight: 600;
+    opacity: .75;
+}
+
+.ftx-settings .ftx-value {
+    opacity: .7;
+}
+
+.ftx-settings input[type="range"] {
+    width: 100%;
+    margin: 0;
+}
+
+.ftx-settings .ftx-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.ftx-settings .ftx-hint {
+    opacity: .6;
+    line-height: 1.4;
+}

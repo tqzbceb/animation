@@ -1,0 +1,11 @@
+{
+    "display_name": "流畅切换动画 Fluid Transitions",
+    "loading_order": 20,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "tqzbceb",
+    "version": "1.1.0",
+    "homePage": "https://github.com/tqzbceb/claude-plug-in"
+}
